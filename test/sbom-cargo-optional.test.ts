@@ -1,7 +1,7 @@
 /**
  * Cargo `[dependencies] optional = true` is an optional manifest row.
  * `[dev-dependencies]` stays off that mark, including when the entry also
- * sets `optional = true`.
+ * sets `optional = true`. That crate is a direct development row.
  */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -102,9 +102,11 @@ describe('sbom export: Cargo optional dependencies', () => {
 
     const project = first.projects[0]!;
     expect(project.dependencies.map((dep) => [dep.package, dep.section])).toEqual([
+      ['dev-optional-crate', 'devDependencies'],
       ['optional-crate', 'optionalDependencies'],
       ['required-crate', 'dependencies'],
     ]);
+    expect(project.dependencyAgeBuckets).toEqual({ current: 0, oneBehind: 0, twoPlusBehind: 0, unknown: 2 });
 
     const cdx = first.cdx as {
       components: Array<{ name: string; scope?: string; properties: Array<{ name: string; value: string }> }>;
@@ -116,10 +118,10 @@ describe('sbom export: Cargo optional dependencies', () => {
 
     expect(byName.get('optional-crate')?.scope).toBe('optional');
     expect(byName.get('required-crate')?.scope).toBeUndefined();
-    expect(byName.get('dev-optional-crate')?.scope).toBeUndefined();
+    expect(byName.get('dev-optional-crate')?.scope).toBe('excluded');
     expect(vibScope('optional-crate')).toBe('direct');
     expect(vibScope('required-crate')).toBe('direct');
-    expect(vibScope('dev-optional-crate')).toBe('transitive');
+    expect(vibScope('dev-optional-crate')).toBe('direct');
     expect(cdx.dependencies).toBeUndefined();
 
     const spdx = first.spdx as {
@@ -129,12 +131,16 @@ describe('sbom export: Cargo optional dependencies', () => {
     const id = (name: string): string => `SPDXRef-Package-${spdx.packages.findIndex((pkg) => pkg.name === name) + 1}`;
     expect(spdx.relationships).toEqual([
       {
+        spdxElementId: id('dev-optional-crate'),
+        relatedSpdxElementId: 'SPDXRef-DOCUMENT',
+        relationshipType: 'DEV_DEPENDENCY_OF',
+      },
+      {
         spdxElementId: id('optional-crate'),
         relatedSpdxElementId: 'SPDXRef-DOCUMENT',
         relationshipType: 'OPTIONAL_DEPENDENCY_OF',
       },
     ]);
-    expect(spdx.relationships.some((rel) => rel.relationshipType === 'DEV_DEPENDENCY_OF')).toBe(false);
     // The root crate ("app") has no `source` in Cargo.lock and is dropped
     // from the SBOM; only registry crates are components (see #512).
     expect(spdx.packages.map((pkg) => pkg.name)).toEqual(['dev-optional-crate', 'optional-crate', 'required-crate']);

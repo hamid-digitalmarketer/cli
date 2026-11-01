@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { discover } from './discover.js';
 import { LockfileParseError } from '../core-open/utils/lockfile-parse.js';
-import { lockfileVersion, fullDependencyTree, fullDependencyGraph } from './lockfile.js';
+import { lockfileVersion, fullDependencyTree, fullDependencyGraph, gemfileSpecPattern } from './lockfile.js';
 
 /**
  * The point of reading lockfiles at all is that `node_modules` is empty in CI
@@ -580,5 +580,369 @@ describe('SBOM components from Cargo.lock and Go workspaces', () => {
     ]);
     // ...and a tree with only go.work (no go.sum) resolves to nothing.
     expect(fullDependencyGraph(root)).toBeUndefined();
+  });
+});
+describe('Python lockfiles', () => {
+  it('drops the uv editable project from the SBOM and keeps only registry packages', () => {
+    write(
+      'uv.lock',
+      [
+        'version = 1',
+        'requires-python = ">=3.11"',
+        '',
+        '[[package]]',
+        'name = "app"',
+        'version = "0.1.0"',
+        'source = { editable = "." }',
+        '',
+        '[[package]]',
+        'name = "click"',
+        'version = "8.1.7"',
+        'source = { registry = "https://pypi.org/simple" }',
+        '',
+      ].join('\n'),
+    );
+    expect(fullDependencyGraph(root)?.ecosystem).toBe('pypi');
+    expect(fullDependencyGraph(root)?.components).toEqual([{ package: 'click', version: '8.1.7' }]);
+  });
+
+  it('drops virtual / workspace members from a uv lockfile', () => {
+    write(
+      'uv.lock',
+      [
+        '[[package]]',
+        'name = "shared-core"',
+        'version = "0.1.0"',
+        'source = { virtual = "packages/core" }',
+        '',
+        '[[package]]',
+        'name = "pydantic"',
+        'version = "2.9.2"',
+        'source = { registry = "https://pypi.org/simple" }',
+        '',
+      ].join('\n'),
+    );
+    expect(fullDependencyGraph(root)?.components).toEqual([{ package: 'pydantic', version: '2.9.2' }]);
+  });
+
+  it('keeps poetry.lock, then uv.lock, then Pipfile.lock precedence', () => {
+    write('poetry.lock', ['[[package]]', 'name = "click"', 'version = "8.1.3"'].join('\n'));
+    write(
+      'uv.lock',
+      ['[[package]]', 'name = "click"', 'version = "8.1.7"', 'source = { registry = "https://pypi.org/simple" }'].join('\n'),
+    );
+    write('Pipfile.lock', JSON.stringify({ default: { click: { version: '==8.0.0' } } }));
+    expect(lockfileVersion(root, 'pypi', 'click')).toBe('8.1.3');
+
+    fs.rmSync(path.join(root, 'poetry.lock'));
+    expect(lockfileVersion(root, 'pypi', 'click')).toBe('8.1.7');
+
+    fs.rmSync(path.join(root, 'uv.lock'));
+    expect(lockfileVersion(root, 'pypi', 'click')).toBe('8.0.0');
+  });
+
+  it('matches PEP 503 normalised names across separators and case', () => {
+    write(
+      'uv.lock',
+      ['[[package]]', 'name = "Flask_Cors"', 'version = "4.0.1"', 'source = { registry = "https://pypi.org/simple" }'].join('\n'),
+    );
+    expect(lockfileVersion(root, 'pypi', 'flask-cors')).toBe('4.0.1');
+    expect(lockfileVersion(root, 'pypi', 'Flask.Cors')).toBe('4.0.1');
+    expect(lockfileVersion(root, 'pypi', 'flask_cors')).toBe('4.0.1');
+  });
+
+  it('resolves Pipfile develop entries and strips the == prefix', () => {
+    write(
+      'Pipfile.lock',
+      JSON.stringify({
+        default: { requests: { version: '==2.31.0' } },
+        develop: { pytest: { version: '==8.0.0' } },
+      }),
+    );
+    expect(lockfileVersion(root, 'pypi', 'pytest')).toBe('8.0.0');
+  });
+
+  it('returns undefined for Pipfile path and git entries', () => {
+    write(
+      'Pipfile.lock',
+      JSON.stringify({
+        default: {
+          localpkg: { path: '.', editable: true },
+          gitpkg: { git: 'https://example.invalid/repo.git', ref: 'main' },
+        },
+      }),
+    );
+    expect(lockfileVersion(root, 'pypi', 'localpkg')).toBeUndefined();
+    expect(lockfileVersion(root, 'pypi', 'gitpkg')).toBeUndefined();
+  });
+});
+
+describe('Gemfile.lock and composer.lock edge cases', () => {
+  // One fixture covering every pinned case: a platform-specific gem, a
+  // dot-separated prerelease, a 6-space nested constraint, a name prefix
+  // (`rails` vs `rails-html-sanitizer`), and PATH/GIT sources.
+  const GEMFILE_LOCK = [
+    'GEM',
+    '  remote: https://rubygems.org/',
+    '  specs:',
+    '    nokogiri (1.16.2-x86_64-linux)',
+    '    rails (7.1.3)',
+    '      rack (>= 2.2)',
+    '    rack (3.0.9)',
+    '    rails-html-sanitizer (1.6.0)',
+    '    rspec (1.0.0.pre)',
+    '',
+    'PATH',
+    '  remote: vendor/gems',
+    '  specs:',
+    '    billing (0.1.0)',
+    '',
+    'GIT',
+    '  remote: https://github.com/example/inline-tool.git',
+    '  revision: 0123456789abcdef0123456789abcdef01234567',
+    '  branch: main',
+    '  specs:',
+    '    inline-tool (0.2.0)',
+    '',
+    'PLATFORMS',
+    '  x86_64-linux',
+    '',
+    'DEPENDENCIES',
+    '  billing!',
+    '  inline-tool!',
+    '  nokogiri',
+    '  rails (~> 7.1)',
+    '',
+  ].join('\n');
+
+  it('ruby: strips the platform suffix from a platform-specific gem pin', () => {
+    write('Gemfile.lock', GEMFILE_LOCK);
+    expect(lockfileVersion(root, 'ruby', 'nokogiri')).toBe('1.16.2');
+  });
+
+  it('ruby: keeps a dot-separated prerelease version intact', () => {
+    write('Gemfile.lock', GEMFILE_LOCK);
+    expect(lockfileVersion(root, 'ruby', 'rspec')).toBe('1.0.0.pre');
+  });
+
+  it('ruby: PATH and GIT sections resolve like GEM specs', () => {
+    write('Gemfile.lock', GEMFILE_LOCK);
+    expect(lockfileVersion(root, 'ruby', 'billing')).toBe('0.1.0');
+    expect(lockfileVersion(root, 'ruby', 'inline-tool')).toBe('0.2.0');
+  });
+
+  it('ruby: a 6-space nested constraint is not the version, and a name prefix does not match', () => {
+    write('Gemfile.lock', GEMFILE_LOCK);
+    expect(lockfileVersion(root, 'ruby', 'rack')).toBe('3.0.9');
+    expect(lockfileVersion(root, 'ruby', 'rails')).toBe('7.1.3');
+    expect(lockfileVersion(root, 'ruby', 'rails-html-sanitizer')).toBe('1.6.0');
+  });
+
+  it('ruby: a hostile spec line does not backtrack quadratically', () => {
+    // No closing paren: the old pattern had to try every split between the
+    // version and the optional platform group, which is quadratic.
+    const hostile = `    nokogiri (1${'-a'.repeat(100_000)}`;
+    const started = Date.now();
+    expect(gemfileSpecPattern('nokogiri').test(hostile)).toBe(false);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it('php: packages-dev entries resolve', () => {
+    write(
+      'composer.lock',
+      JSON.stringify({
+        packages: [{ name: 'monolog/monolog', version: '3.5.0' }],
+        'packages-dev': [{ name: 'phpunit/phpunit', version: 'v10.5.0' }],
+      }),
+    );
+    expect(lockfileVersion(root, 'php', 'phpunit/phpunit')).toBe('10.5.0');
+  });
+
+  it('php: strips a leading v, and a path-repository dev version is returned as written', () => {
+    write(
+      'composer.lock',
+      JSON.stringify({
+        packages: [{ name: 'acme/tool', version: 'v3.5.0' }],
+        'packages-dev': [{ name: 'acme/local', version: 'dev-main' }],
+      }),
+    );
+    expect(lockfileVersion(root, 'php', 'acme/tool')).toBe('3.5.0');
+    expect(lockfileVersion(root, 'php', 'acme/local')).toBe('dev-main');
+  });
+});
+
+describe('lockfileVersion — dotnet (packages.lock.json)', () => {
+  it('matches ids case-insensitively (newtonsoft.json finds Newtonsoft.Json)', () => {
+    write(
+      'packages.lock.json',
+      JSON.stringify({
+        dependencies: {
+          'net8.0': { 'Newtonsoft.Json': { type: 'Direct', requested: '13.0.3', resolved: '13.0.3' } },
+        },
+      }),
+    );
+    expect(lockfileVersion(root, 'dotnet', 'newtonsoft.json')).toBe('13.0.3');
+  });
+
+  it('returns undefined for "type": "Project" entries without a resolved pin', () => {
+    write(
+      'packages.lock.json',
+      JSON.stringify({
+        dependencies: {
+          'net8.0': {
+            ProjectX: { type: 'Project', requested: '1.0.0' },
+            'Newtonsoft.Json': { type: 'Direct', requested: '13.0.3', resolved: '13.0.3' },
+          },
+        },
+      }),
+    );
+    expect(lockfileVersion(root, 'dotnet', 'ProjectX')).toBeUndefined();
+  });
+
+  it('uses the first target framework that pins the package', () => {
+    write(
+      'packages.lock.json',
+      JSON.stringify({
+        dependencies: {
+          'net6.0': { 'Serilog.Sinks.Console': { type: 'Direct', requested: '4.1.0', resolved: '4.1.0' } },
+          'net8.0': { 'Serilog.Sinks.Console': { type: 'Direct', requested: '5.0.0', resolved: '5.0.0' } },
+        },
+      }),
+    );
+    expect(lockfileVersion(root, 'dotnet', 'Serilog.Sinks.Console')).toBe('4.1.0');
+  });
+});
+
+describe('lockfileVersion — swift (Package.resolved)', () => {
+  it('resolves v1 pins from the repositoryURL-derived identity', () => {
+    write(
+      'Package.resolved',
+      JSON.stringify({
+        object: {
+          pins: [
+            {
+              package: 'ArgumentParser',
+              repositoryURL: 'https://github.com/apple/swift-argument-parser',
+              state: { revision: 'abc123', version: '1.2.0' },
+            },
+          ],
+        },
+        version: 1,
+      }),
+    );
+    expect(lockfileVersion(root, 'swift', 'swift-argument-parser')).toBe('1.2.0');
+  });
+
+  it('strips a trailing .git suffix when deriving the v1 identity', () => {
+    write(
+      'Package.resolved',
+      JSON.stringify({
+        object: {
+          pins: [
+            {
+              package: 'NIO',
+              repositoryURL: 'https://github.com/apple/swift-nio.git',
+              state: { revision: 'abc123', version: '2.65.0' },
+            },
+          ],
+        },
+        version: 1,
+      }),
+    );
+    expect(lockfileVersion(root, 'swift', 'swift-nio')).toBe('2.65.0');
+  });
+
+  it('matches v2 identities case-insensitively', () => {
+    write(
+      'Package.resolved',
+      JSON.stringify({
+        pins: [{ identity: 'Swift-NIO', state: { revision: 'abc123', version: '2.65.0' } }],
+        version: 2,
+      }),
+    );
+    expect(lockfileVersion(root, 'swift', 'swift-nio')).toBe('2.65.0');
+  });
+
+  it('returns undefined for branch pins without a version', () => {
+    write(
+      'Package.resolved',
+      JSON.stringify({
+        pins: [{ identity: 'swift-nio', state: { branch: 'main', revision: 'abc123' } }],
+        version: 2,
+      }),
+    );
+    expect(lockfileVersion(root, 'swift', 'swift-nio')).toBeUndefined();
+  });
+});
+
+describe('lockfileVersion — dart (pubspec.lock)', () => {
+  const SDK_LOCK = [
+    'packages:',
+    '  flutter:',
+    '    dependency: "direct main"',
+    '    description: flutter',
+    '    source: sdk',
+    '    version: "0.0.0"',
+    '  http:',
+    '    dependency: "direct main"',
+    '    description:',
+    '      name: http',
+    '      sha256: deadbeef',
+    '      url: "https://pub.dev"',
+    '    source: hosted',
+    '    version: "1.2.2"',
+    '',
+  ].join('\n');
+
+  it('returns undefined for SDK packages (source: sdk) instead of the fake 0.0.0 pin', () => {
+    write('pubspec.lock', SDK_LOCK);
+    expect(lockfileVersion(root, 'dart', 'flutter')).toBeUndefined();
+  });
+
+  it('still resolves hosted packages', () => {
+    write('pubspec.lock', SDK_LOCK);
+    expect(lockfileVersion(root, 'dart', 'http')).toBe('1.2.2');
+  });
+
+  it('returns the version as written for path packages', () => {
+    write(
+      'pubspec.lock',
+      [
+        'packages:',
+        '  my_pkg:',
+        '    dependency: "direct main"',
+        '    description:',
+        '      path: "../my_pkg"',
+        '      relative: true',
+        '    source: path',
+        '    version: "0.4.1"',
+        '',
+      ].join('\n'),
+    );
+    expect(lockfileVersion(root, 'dart', 'my_pkg')).toBe('0.4.1');
+  });
+});
+
+describe('lockfileVersion — java (gradle.lockfile)', () => {
+  const LOCKFILE = [
+    '# This is a comment, never a match',
+    '# com.fake:fake:9.9.9=compileClasspath,runtimeClasspath',
+    'com.google.guava:guava:33.0.0-jre=compileClasspath',
+    '',
+  ].join('\n');
+
+  it('requires the group:artifact form (guava alone returns undefined)', () => {
+    write('gradle.lockfile', LOCKFILE);
+    expect(lockfileVersion(root, 'java', 'guava')).toBeUndefined();
+  });
+
+  it('resolves the full group:artifact pin', () => {
+    write('gradle.lockfile', LOCKFILE);
+    expect(lockfileVersion(root, 'java', 'com.google.guava:guava')).toBe('33.0.0-jre');
+  });
+
+  it('never matches a commented pin line', () => {
+    write('gradle.lockfile', LOCKFILE);
+    expect(lockfileVersion(root, 'java', 'com.fake:fake')).toBeUndefined();
   });
 });
