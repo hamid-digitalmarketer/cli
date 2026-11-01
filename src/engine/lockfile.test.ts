@@ -504,84 +504,6 @@ describe('lockfile package digests', () => {
   });
 });
 
-describe('SBOM components from Cargo.lock and Go workspaces', () => {
-  const REGISTRY = 'registry+https://github.com/rust-lang/crates.io-index';
-
-  it('drops root and path crates from Cargo.lock and keeps registry crates, one component per version', () => {
-    write(
-      'Cargo.lock',
-      [
-        'version = 3',
-        '',
-        '[[package]]',
-        'name = "app"',
-        'version = "0.1.0"',
-        'dependencies = [',
-        ' "core-lib",',
-        ' "serde",',
-        ' "syn",',
-        ']',
-        '',
-        '[[package]]',
-        'name = "core-lib"',
-        'version = "0.2.0"',
-        '',
-        '[[package]]',
-        'name = "serde"',
-        'version = "1.0.197"',
-        `source = "${REGISTRY}"`,
-        '',
-        '[[package]]',
-        'name = "syn"',
-        'version = "1.0.109"',
-        `source = "${REGISTRY}"`,
-        '',
-        '[[package]]',
-        'name = "syn"',
-        'version = "2.0.52"',
-        `source = "${REGISTRY}"`,
-        '',
-      ].join('\n'),
-    );
-    // The scanned project itself and the local path crate have no `source`,
-    // so they must not appear as crates.io components (see #512).
-    expect(fullDependencyGraph(root)?.components).toEqual([
-      { package: 'serde', version: '1.0.197' },
-      { package: 'syn', version: '1.0.109' },
-      { package: 'syn', version: '2.0.52' },
-    ]);
-  });
-
-  it('resolves a go.work module through its own go.sum and treats a go.work-only root as undefined', () => {
-    fs.mkdirSync(path.join(root, 'api'), { recursive: true });
-    fs.mkdirSync(path.join(root, 'lib'), { recursive: true });
-    write(
-      'go.work',
-      ['go 1.22', '', 'use (', '\t./api', '\t./lib', ')', ''].join('\n'),
-    );
-    write(
-      path.join('api', 'go.sum'),
-      [
-        'github.com/gin-contrib/sse v1.1.0 h1:abc=',
-        'github.com/gin-contrib/sse v1.1.0/go.mod h1:def=',
-        'golang.org/x/net v0.27.0 h1:xyz=',
-        'golang.org/x/net v0.27.0/go.mod h1:xyz=',
-      ].join('\n'),
-    );
-    write(
-      path.join('lib', 'go.sum'),
-      ['golang.org/x/text v0.16.0 h1:abc=', 'golang.org/x/text v0.16.0/go.mod h1:def='].join('\n'),
-    );
-    // `go.work` is not read: each module's go.sum is the resolution unit.
-    // Scanning the module directory lists that module's rows...
-    expect(fullDependencyGraph(path.join(root, 'api'))?.components).toEqual([
-      { package: 'github.com/gin-contrib/sse', version: 'v1.1.0' },
-      { package: 'golang.org/x/net', version: 'v0.27.0' },
-    ]);
-    // ...and a tree with only go.work (no go.sum) resolves to nothing.
-    expect(fullDependencyGraph(root)).toBeUndefined();
-  });
-});
 describe('Python lockfiles', () => {
   it('drops the uv editable project from the SBOM and keeps only registry packages', () => {
     write(
@@ -944,5 +866,84 @@ describe('lockfileVersion — java (gradle.lockfile)', () => {
   it('never matches a commented pin line', () => {
     write('gradle.lockfile', LOCKFILE);
     expect(lockfileVersion(root, 'java', 'com.fake:fake')).toBeUndefined();
+  });
+});
+
+describe('SBOM components from Cargo.lock and Go workspaces', () => {
+  const REGISTRY = 'registry+https://github.com/rust-lang/crates.io-index';
+
+  it('drops root and path crates from Cargo.lock and keeps registry crates, one component per version', () => {
+    write(
+      'Cargo.lock',
+      [
+        'version = 3',
+        '',
+        '[[package]]',
+        'name = "app"',
+        'version = "0.1.0"',
+        'dependencies = [',
+        ' "core-lib",',
+        ' "serde",',
+        ' "syn",',
+        ']',
+        '',
+        '[[package]]',
+        'name = "core-lib"',
+        'version = "0.2.0"',
+        '',
+        '[[package]]',
+        'name = "serde"',
+        'version = "1.0.197"',
+        `source = "${REGISTRY}"`,
+        '',
+        '[[package]]',
+        'name = "syn"',
+        'version = "1.0.109"',
+        `source = "${REGISTRY}"`,
+        '',
+        '[[package]]',
+        'name = "syn"',
+        'version = "2.0.52"',
+        `source = "${REGISTRY}"`,
+        '',
+      ].join('\n'),
+    );
+    // The scanned project itself and the local path crate have no `source`,
+    // so they must not appear as crates.io components (see #512).
+    expect(fullDependencyGraph(root)?.components).toEqual([
+      { package: 'serde', version: '1.0.197' },
+      { package: 'syn', version: '1.0.109' },
+      { package: 'syn', version: '2.0.52' },
+    ]);
+  });
+
+  it('resolves a go.work module through its own go.sum and treats a go.work-only root as undefined', () => {
+    fs.mkdirSync(path.join(root, 'api'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'lib'), { recursive: true });
+    write(
+      'go.work',
+      ['go 1.22', '', 'use (', '\t./api', '\t./lib', ')', ''].join('\n'),
+    );
+    write(
+      path.join('api', 'go.sum'),
+      [
+        'github.com/gin-contrib/sse v1.1.0 h1:abc=',
+        'github.com/gin-contrib/sse v1.1.0/go.mod h1:def=',
+        'golang.org/x/net v0.27.0 h1:xyz=',
+        'golang.org/x/net v0.27.0/go.mod h1:xyz=',
+      ].join('\n'),
+    );
+    write(
+      path.join('lib', 'go.sum'),
+      ['golang.org/x/text v0.16.0 h1:abc=', 'golang.org/x/text v0.16.0/go.mod h1:def='].join('\n'),
+    );
+    // `go.work` is not read: each module's go.sum is the resolution unit.
+    // Scanning the module directory lists that module's rows...
+    expect(fullDependencyGraph(path.join(root, 'api'))?.components).toEqual([
+      { package: 'github.com/gin-contrib/sse', version: 'v1.1.0' },
+      { package: 'golang.org/x/net', version: 'v0.27.0' },
+    ]);
+    // ...and a tree with only go.work (no go.sum) resolves to nothing.
+    expect(fullDependencyGraph(root)).toBeUndefined();
   });
 });

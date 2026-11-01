@@ -262,8 +262,10 @@ describe('sbom export: Cargo dev and build dependencies', () => {
     }
     expect(vibScope(first.cdx, 'lockfile-only')).toBe('transitive');
     expect(first.cdx.components.find((row) => row.name === 'lockfile-only')?.scope).toBeUndefined();
-    expect(vibScope(first.cdx, 'app')).toBeUndefined();
+    // The root crate ("app") has no `source` in Cargo.lock, so it is the
+    // scanned project, not a crates.io component, and is left out (see #512).
     expect(first.cdx.components.some((row) => row.name === 'app')).toBe(false);
+    expect(first.spdx.packages.some((pkg) => pkg.name === 'app')).toBe(false);
     expect(first.cdx.components.some((row) => row.name === 'dev-only-missing')).toBe(true);
     expect(first.cdx.dependencies).toBeUndefined();
 
